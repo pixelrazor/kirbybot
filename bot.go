@@ -62,6 +62,7 @@ func main() {
 			log.Fatalln("Failed to open DB:", err)
 		}
 		defer db.Close()
+		repo = NewBoltRepo(db)
 	}
 
 	dg, err := discordgo.New("Bot " + env[discordTokenKey])
