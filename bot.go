@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/boltdb/bolt"
 	"github.com/bwmarrin/discordgo"
@@ -114,8 +115,9 @@ func listenToKirby(s *discordgo.Session, env map[string]string) {
 					log.Println("Tweet stream error:", err)
 				}
 			}
-			log.Println("Restarting tweet stream")
 		}()
+		time.Sleep(30 * time.Second)
+		log.Println("Restarting tweet stream")
 	}
 }
 
@@ -153,7 +155,7 @@ func doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 				}
 				_, err = s.ChannelMessageSend(ch.ID, fmt.Sprintf("Hey there! It looks like I failed to kirb post in <#%v>. "+
 					"Please make sure I have permission to post there. If I do have permission, maybe message my owner "+
-					"so he can see what's up. (This may be useful to him: \"%v\")", channel, sendError))
+					"so he can see what's up. (This may be useful to him: \"%v\"). Try the about command to get contact info!", channel, sendError))
 				if err != nil {
 					log.Println("Failed to message server owner. guild:", guild, "owner:", g.OwnerID, "-", err)
 					return
@@ -183,6 +185,20 @@ func onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 			fields = append(fields, "help")
 		}
 		switch fields[1] {
+		case "about":
+			embed := &discordgo.MessageEmbed{
+				Title: "About Kirby Bot",
+				Description: fmt.Sprintf("Kirby bot provides kirby posting to servers far and wide! "+
+					"It currently brings joy and kirby posting to %v servers. Would you like "+
+					"Kirby Bot in one of your servers? [Click here!](%v) Kirby Bot is no-nonsense "+
+					"and [open source](https://github.com/pixelrazor/kirbybot). For any questions, "+
+					"feedback, or ideas, feel free to reach out to my creator through the information"+
+					"available in the github link",
+					len(s.State.Guilds),
+					"https://discord.com/oauth2/authorize?client_id=723217306557218827&scope=bot&permissions=388160"),
+				Color: embedColor,
+			}
+			s.ChannelMessageSendEmbed(m.ChannelID, embed)
 		case "set-kirb-post":
 			if !isAdmin(s, m.GuildID, m.Author.ID) {
 				s.ChannelMessageSend(m.ChannelID, "You don't have permission for that!")
@@ -238,6 +254,10 @@ func postHelp(s *discordgo.Session, ch string) error {
 				Inline: false,
 				Name:   "**check-kirb-post**",
 				Value:  "See whether or not kirb-posting is enabled, and what channel it is set to",
+			}, {
+				Inline: false,
+				Name:   "about",
+				Value:  "See info about Kirby Bot",
 			}, {
 				Inline: false,
 				Name:   "help",
