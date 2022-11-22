@@ -1,7 +1,5 @@
 FROM golang:alpine
 
-VOLUME [ "/data" ]
-
 WORKDIR /app
 
 COPY . .

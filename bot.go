@@ -6,12 +6,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/dghubble/go-twitter/twitter"
@@ -24,9 +22,23 @@ const (
 	twitterConsumerSecretKey = "TWITTER_CONSUMER_SECRET"
 	twitterAccessTokenKey    = "TWITTER_ACCESS_TOKEN"
 	twitterAccessSecretKey   = "TWITTER_ACCESS_SECRET"
+	dbHostKey                = "DB_HOST"
+	dbUserKey                = "DB_USER"
+	dbPassKey                = "DB_PASS"
+	dbNameKey                = "DB_NAME"
 )
 
 const embedColor = 0xffa6c9
+
+func verifyEnv(env map[string]string) {
+	for k := range env {
+		val, ok := os.LookupEnv(k)
+		if !ok {
+			log.Fatalln("Missing " + k + " in env")
+		}
+		env[k] = val
+	}
+}
 
 func main() {
 	env := map[string]string{
@@ -36,16 +48,8 @@ func main() {
 		twitterAccessTokenKey:    "",
 		twitterAccessSecretKey:   "",
 	}
-	for k := range env {
-		val, ok := os.LookupEnv(k)
-		if !ok {
-			log.Fatalln("Missing " + k + " in env")
-		}
-		env[k] = val
-	}
-
-	dbDir := flag.String("dbdir", "/data", "Directory where database is stored (if not running in memory mode)")
-	mem := flag.Bool("mem", false, "Use an in-memory data store instead of bolt DB")
+	verifyEnv(env)
+	mem := flag.Bool("mem", false, "Use an in-memory data store")
 	flag.Parse()
 
 	var repo ConfigRepository
@@ -53,12 +57,18 @@ func main() {
 		log.Println("Using memory")
 		repo = NewMapRepo()
 	} else {
-		db, err := bolt.Open(filepath.Join(*dbDir, "kirb.db"), 0600, nil)
+		env[dbHostKey] = ""
+		env[dbUserKey] = ""
+		env[dbPassKey] = ""
+		env[dbNameKey] = ""
+		verifyEnv(env)
+
+		pgr, err := NewPostgresRepo(env[dbHostKey], env[dbNameKey], env[dbUserKey], env[dbPassKey])
 		if err != nil {
-			log.Fatalln("Failed to open DB:", err)
+			log.Fatalln("Failed to connect to postgres:", env[dbHostKey], env[dbNameKey], env[dbUserKey], err)
 		}
-		defer db.Close()
-		repo = NewBoltRepo(db)
+		defer pgr.Close()
+		repo = pgr
 	}
 
 	key := "Bot " + env[discordTokenKey]
