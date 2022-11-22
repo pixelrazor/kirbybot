@@ -4,10 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -90,10 +89,10 @@ func main() {
 
 	go bot.listenToKirby(dg, env)
 
-	// Wait for SIGINT and SIGTERM (HIT CTRL-C)
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-	log.Println("Quitting from signal:", <-ch)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "I'm alive")
+	})
+	http.ListenAndServe(":8086", nil)
 }
 
 func (kb *KirbyBot) listenToKirby(s *discordgo.Session, env map[string]string) {
