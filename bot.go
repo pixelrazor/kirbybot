@@ -132,7 +132,11 @@ func (kb *KirbyBot) doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 	}
 
 	// Get channels to post tweets to
-	channels := kb.repo.GetKirbChannels()
+	channels, err := kb.repo.GetKirbChannels()
+	if err != nil {
+		log.Println("Failed to get kirb posting channels:", err)
+		return
+	}
 
 	wg := sync.WaitGroup{}
 	for guild, channel := range channels {
@@ -156,7 +160,7 @@ func (kb *KirbyBot) doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 				}
 				_, err = s.ChannelMessageSend(ch.ID, fmt.Sprintf("Hey there! It looks like I failed to kirb post in <#%v>. "+
 					"Please make sure I have permission to post there. If I do have permission, maybe message my owner "+
-					"so he can see what's up. (This may be useful to him: \"%v\"). Try the about command to get contact info!", channel, sendError))
+					"so they can see what's up. (This may be useful to them: \"%v\"). Try the about command to get contact info!", channel, sendError))
 				if err != nil {
 					log.Println("Failed to message server owner. guild:", guild, "owner:", g.OwnerID, "-", err)
 					return
@@ -292,6 +296,7 @@ func (kb *KirbyBot) aboutHandler(s *discordgo.Session, i *discordgo.InteractionC
 func (kb *KirbyBot) channelHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	options := i.ApplicationCommandData().Options
 	mesg := ""
+	var err error
 	switch options[0].Name {
 	case "set":
 		channel := i.ChannelID
@@ -299,10 +304,18 @@ func (kb *KirbyBot) channelHandler(s *discordgo.Session, i *discordgo.Interactio
 			channel = options[0].Options[0].ChannelValue(s).ID
 		}
 
-		kb.repo.SetKirbChannel(i.GuildID, channel)
+		err = kb.repo.SetKirbChannel(i.GuildID, channel)
+		if err != nil {
+			break
+		}
 		mesg = fmt.Sprintf("Let the kirb posting commence in <#%v>!", channel)
 	case "check":
-		ch, ok := kb.repo.GetKirbChannels()[i.GuildID]
+		var channels map[string]string
+		channels, err = kb.repo.GetKirbChannels()
+		if err != nil {
+			break
+		}
+		ch, ok := channels[i.GuildID]
 		if !ok {
 			mesg = "No kirb posting on this server :c"
 			break
@@ -311,6 +324,10 @@ func (kb *KirbyBot) channelHandler(s *discordgo.Session, i *discordgo.Interactio
 	case "remove":
 		kb.repo.RemoveKirbChannel(i.GuildID)
 		mesg = "No more kirb posting :c"
+	}
+	if err != nil {
+		log.Printf("Failed channel %v: %v\n", options[0].Name, err)
+		mesg = fmt.Sprintf("Failed: %v", err)
 	}
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
