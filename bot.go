@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,10 +16,6 @@ import (
 
 	"github.com/dghubble/go-twitter/twitter"
 	"github.com/dghubble/oauth1"
-)
-
-var (
-	repo ConfigRepository
 )
 
 const (
@@ -53,6 +48,7 @@ func main() {
 	mem := flag.Bool("mem", false, "Use an in-memory data store instead of bolt DB")
 	flag.Parse()
 
+	var repo ConfigRepository
 	if *mem {
 		log.Println("Using memory")
 		repo = NewMapRepo()
@@ -65,20 +61,24 @@ func main() {
 		repo = NewBoltRepo(db)
 	}
 
-	dg, err := discordgo.New("Bot " + env[discordTokenKey])
+	key := "Bot " + env[discordTokenKey]
+	dg, err := discordgo.New(key)
 	if err != nil {
 		log.Fatalln("Failed to create dg session:", err)
 	}
 
-	dg.AddHandler(onReady)
-	dg.AddHandler(onMessage)
-
-	if err := dg.Open(); err != nil {
-		log.Fatalln("Failed to start dg session:", err)
+	bot := KirbyBot{
+		s:    dg,
+		repo: repo,
 	}
-	defer dg.Close()
 
-	go listenToKirby(dg, env)
+	bot.handlers()
+
+	if err := bot.run(); err != nil {
+		log.Fatalln("Failed to start bot:", err)
+	}
+
+	go bot.listenToKirby(dg, env)
 
 	// Wait for SIGINT and SIGTERM (HIT CTRL-C)
 	ch := make(chan os.Signal, 1)
@@ -86,7 +86,7 @@ func main() {
 	log.Println("Quitting from signal:", <-ch)
 }
 
-func listenToKirby(s *discordgo.Session, env map[string]string) {
+func (kb *KirbyBot) listenToKirby(s *discordgo.Session, env map[string]string) {
 	config := oauth1.NewConfig(env[twitterConsumerKeyKey], env[twitterConsumerSecretKey])
 	token := oauth1.NewToken(env[twitterAccessTokenKey], env[twitterAccessSecretKey])
 	// OAuth1 http.Client will automatically authorize Requests
@@ -111,7 +111,7 @@ func listenToKirby(s *discordgo.Session, env map[string]string) {
 			for message := range stream.Messages {
 				switch m := message.(type) {
 				case *twitter.Tweet:
-					doKirbPost(m, s)
+					kb.doKirbPost(m, s)
 				case error:
 					log.Println("Tweet stream error:", err)
 				}
@@ -122,7 +122,7 @@ func listenToKirby(s *discordgo.Session, env map[string]string) {
 	}
 }
 
-func doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
+func (kb *KirbyBot) doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 	if tweet.Retweeted || tweet.RetweetedStatus != nil || tweet.InReplyToUserID != 0 {
 		return
 	}
@@ -132,7 +132,7 @@ func doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 	}
 
 	// Get channels to post tweets to
-	channels := repo.GetKirbChannels()
+	channels := kb.repo.GetKirbChannels()
 
 	wg := sync.WaitGroup{}
 	for guild, channel := range channels {
@@ -168,127 +168,154 @@ func doKirbPost(tweet *twitter.Tweet, s *discordgo.Session) {
 	wg.Wait()
 }
 
-func onReady(s *discordgo.Session, r *discordgo.Ready) {
-	log.Println("Kirby reporting for duty!")
+type KirbyBot struct {
+	s    *discordgo.Session
+	repo ConfigRepository
 }
 
-func onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.Bot {
-		return
+type KirbyBotInteraction struct {
+	command *discordgo.ApplicationCommand
+	handler func(s *discordgo.Session, i *discordgo.InteractionCreate)
+}
+
+func commandPermissions(permissions ...int) *int64 {
+	var permission int64
+	for _, p := range permissions {
+		permission |= int64(p)
 	}
-	fields := strings.Fields(m.Content)
-	if len(fields) == 0 {
-		return
-	}
-	// TODO: slash commands when discordgo tags a new release and has the permissions API
-	if fields[0] == "!kb" {
-		if len(fields) == 1 {
-			fields = append(fields, "help")
-		}
-		switch fields[1] {
-		case "about":
-			embed := &discordgo.MessageEmbed{
-				Title: "About Kirby Bot",
-				Description: fmt.Sprintf("Kirby bot provides kirby posting to servers far and wide! "+
-					"It currently brings joy and kirby posting to %v servers. Would you like "+
-					"Kirby Bot in one of your servers? [Click here!](%v) Kirby Bot is no-nonsense "+
-					"and [open source](https://github.com/pixelrazor/kirbybot). For any questions, "+
-					"feedback, or ideas, feel free to reach out to my creator through the information"+
-					"available in the github link",
-					len(s.State.Guilds),
-					"https://discord.com/oauth2/authorize?client_id=723217306557218827&scope=bot&permissions=388160"),
-				Color: embedColor,
-			}
-			s.ChannelMessageSendEmbed(m.ChannelID, embed)
-		case "set-kirb-post":
-			if !isAdmin(s, m.GuildID, m.Author.ID) {
-				s.ChannelMessageSend(m.ChannelID, "You don't have permission for that!")
-				break
-			}
-			// TODO: use the channel given, defaulting to current channel if no channel is supplied
-			repo.SetKirbChannel(m.GuildID, m.ChannelID)
-			s.ChannelMessageSend(m.ChannelID, "Let the kirb posting commence!")
-		case "remove-kirb-post":
-			if !isAdmin(s, m.GuildID, m.Author.ID) {
-				s.ChannelMessageSend(m.ChannelID, "You don't have permission for that!")
-				break
-			}
-			repo.RemoveKirbChannel(m.GuildID)
-			s.ChannelMessageSend(m.ChannelID, "No more kirb posting :c")
-		case "check-kirb-post":
-			if !isAdmin(s, m.GuildID, m.Author.ID) {
-				s.ChannelMessageSend(m.ChannelID, "You don't have permission for that!")
-				break
-			}
-			ch, ok := repo.GetKirbChannels()[m.GuildID]
-			if !ok {
-				s.ChannelMessageSend(m.ChannelID, "No kirb posting on this server :c")
-				return
-			}
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Kirb posting set to happen in <#%v>", ch))
-		case "help":
-			err := postHelp(s, m.ChannelID)
-			if err != nil {
-				log.Println("Failed to post help menu:", err)
-			}
-		default:
-			s.ChannelMessageSend(m.ChannelID, "I dunno what you're tellin me to do")
-		}
+	return &permission
+}
+
+func (kb *KirbyBot) registeredInteractions() []KirbyBotInteraction {
+	falseValue := false
+	return []KirbyBotInteraction{
+		{
+			command: &discordgo.ApplicationCommand{
+				Name:                     "channel",
+				Description:              "Manage the kirb-posting channel",
+				DefaultMemberPermissions: commandPermissions(discordgo.PermissionAdministrator),
+				DMPermission:             &falseValue,
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "set",
+						Description: "Sets the current channel as the kirb-posting channel (overrides previously set channel)",
+						Options: []*discordgo.ApplicationCommandOption{
+							{
+								Type:        discordgo.ApplicationCommandOptionChannel,
+								Name:        "channel",
+								Description: "Channel to kirb-post to (defaults to current channel)",
+							},
+						},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "check",
+						Description: "See whether or not kirb-posting is enabled, and what channel it is set to",
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionSubCommand,
+						Name:        "remove",
+						Description: "Removes kirb-posting from the server",
+					},
+				},
+			},
+			handler: kb.channelHandler,
+		},
+		{
+			command: &discordgo.ApplicationCommand{
+				Name:        "about",
+				Description: "About Kirby Bot",
+			},
+			handler: kb.aboutHandler,
+		},
 	}
 }
 
-func postHelp(s *discordgo.Session, ch string) error {
-	_, err := s.ChannelMessageSendEmbed(ch, &discordgo.MessageEmbed{
-		Title:       "Help",
-		Description: "The following are all commands I respond to (**bold** commands require admin perms)",
-		Color:       embedColor,
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Inline: false,
-				Name:   "**set-kirb-post**",
-				Value:  "Sets the current channel as the kirb posting channel (overrides previously set channel)",
-			}, {
-				Inline: false,
-				Name:   "**remove-kirb-post**",
-				Value:  "Removes kirb posting from the server (can be run from ANY channel)",
-			}, {
-				Inline: false,
-				Name:   "**check-kirb-post**",
-				Value:  "See whether or not kirb-posting is enabled, and what channel it is set to",
-			}, {
-				Inline: false,
-				Name:   "about",
-				Value:  "See info about Kirby Bot",
-			}, {
-				Inline: false,
-				Name:   "help",
-				Value:  "See this menu again",
+func (kb *KirbyBot) handlers() {
+	interactionHandlers := make(map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate))
+	for _, interaction := range kb.registeredInteractions() {
+		interactionHandlers[interaction.command.Name] = interaction.handler
+
+	}
+	kb.s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if handle, ok := interactionHandlers[i.ApplicationCommandData().Name]; ok {
+			handle(s, i)
+		}
+	})
+	kb.s.AddHandler(kb.handleOnReady())
+}
+
+func (kb *KirbyBot) run() error {
+	if err := kb.s.Open(); err != nil {
+		return fmt.Errorf("failed to start session: %w", err)
+	}
+
+	for _, v := range kb.registeredInteractions() {
+		_, err := kb.s.ApplicationCommandCreate(kb.s.State.User.ID, "", v.command)
+		if err != nil {
+			return fmt.Errorf("cannot create '%v' command: %w", v.command.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (kb *KirbyBot) handleOnReady() interface{} {
+	return func(s *discordgo.Session, r *discordgo.Ready) {
+		log.Println("Kirby reporting for duty!")
+	}
+}
+
+func (kb *KirbyBot) aboutHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{
+				{
+					Title: "About Kirby Bot",
+					Description: fmt.Sprintf("Kirby bot provides kirby posting to servers far and wide! "+
+						"It currently brings joy and kirby posting to %v servers. Would you like "+
+						"Kirby Bot in one of your servers? [Click here!](%v) Kirby Bot is no-nonsense "+
+						"and [open source](https://github.com/pixelrazor/kirbybot). For any questions, "+
+						"feedback, or ideas, feel free to reach out to my creator through the information "+
+						"available in the github link",
+						len(s.State.Guilds),
+						"https://discord.com/oauth2/authorize?client_id=723217306557218827&scope=bot&permissions=388160"),
+					Color: embedColor,
+				},
 			},
 		},
 	})
-	return err
 }
 
-func isAdmin(s *discordgo.Session, guild, member string) bool {
-	m, err := s.GuildMember(guild, member)
-	if err != nil {
-		log.Println("Failed to get guild", guild, "member", member, "-", err)
-		return false
-	}
-	roles, err := s.GuildRoles(guild)
-	if err != nil {
-		log.Println("Failed to get guild", guild, "roles:", err)
-		return false
-	}
-	for _, role := range roles {
-		for _, id := range m.Roles {
-			if id == role.ID {
-				if role.Permissions&discordgo.PermissionAdministrator != 0 {
-					return true
-				}
-				break
-			}
+func (kb *KirbyBot) channelHandler(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	options := i.ApplicationCommandData().Options
+	mesg := ""
+	switch options[0].Name {
+	case "set":
+		channel := i.ChannelID
+		if len(options[0].Options) > 0 {
+			channel = options[0].Options[0].ChannelValue(s).ID
 		}
+
+		kb.repo.SetKirbChannel(i.GuildID, channel)
+		mesg = fmt.Sprintf("Let the kirb posting commence in <#%v>!", channel)
+	case "check":
+		ch, ok := kb.repo.GetKirbChannels()[i.GuildID]
+		if !ok {
+			mesg = "No kirb posting on this server :c"
+			break
+		}
+		mesg = fmt.Sprintf("Kirb posting set to happen in <#%v>", ch)
+	case "remove":
+		kb.repo.RemoveKirbChannel(i.GuildID)
+		mesg = "No more kirb posting :c"
 	}
-	return false
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: mesg,
+		},
+	})
 }
